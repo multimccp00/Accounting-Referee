@@ -1,0 +1,5 @@
+# Exclude game data files from GitHub
+/data/
+
+# private database connection settings (create db_connection.py and keep it secret)
+db_connection.py
