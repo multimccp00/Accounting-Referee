@@ -303,9 +303,33 @@ class GameDataManager:
             if not (fname.startswith('games_') and fname.endswith('.json')):
                 continue
             season = fname[len('games_'):-5].replace('-', '/')
+            # if we’ve previously marked this season imported, double-check that
+            # the current database actually contains rows for it.  markers live in
+            # a global file and are not tied to a specific backend, so switching
+            # from SQLite to MySQL (for example) would otherwise prevent any
+            # data being migrated.  In such cases we re-import the season.
             if season in markers:
-                # already processed earlier
-                continue
+                if self.conn:
+                    try:
+                        placeholder = '?' if self._is_sqlite() else '%s'
+                        cur = self.conn.cursor()
+                        cur.execute(
+                            f"SELECT COUNT(*) FROM games WHERE season={placeholder}",
+                            (season,)
+                        )
+                        row = cur.fetchone()
+                        cur.close()
+                        if row and row[0] > 0:
+                            # data is already present; skip import
+                            continue
+                        # otherwise fall through and re-import below
+                    except Exception:
+                        # if the query fails for any reason treat as not
+                        # imported so we attempt the migration
+                        pass
+                else:
+                    # no connection: nothing to import now, just skip
+                    continue
             # load JSON content
             path = os.path.join(self.data_dir, fname)
             try:

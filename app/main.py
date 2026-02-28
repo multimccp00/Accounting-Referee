@@ -549,10 +549,10 @@ if __name__ == "__main__":
         cfg['dbname'] = os.environ.get('DB_NAME', cfg['dbname'])
 
     # If we already computed a db_error_msg earlier (from URL
-    # processing), show it now before starting the GUI.  we do not pop up a
-    # success message on startup to keep the UI clean; the backend label will
-    # indicate the connection state.
-    if db_error_msg:
+    # processing), we only surface it as a dialog if the user explicitly
+    # supplied a `--db`/REF_DB_PATH value.  Placeholder/default configs will
+    # silently fall back to JSON.
+    if db_error_msg and db_path:
         messagebox.showwarning("Database", db_error_msg + ".\nUsing JSON fallback.")
 
     # if a --db URL was provided, that takes precedence; otherwise try the
@@ -588,20 +588,39 @@ if __name__ == "__main__":
             db_path = None
     else:
         # no URL supplied – attempt general DB connection using cfg
-        try:
-            import pymysql
-            db_conn = pymysql.connect(
-                host=cfg['host'], port=cfg['port'],
-                user=cfg['user'], password=cfg['password'],
-                db=cfg['dbname'], connect_timeout=5
-            )
-        except Exception as exc:
+        # only try to connect if the configuration appears to contain real
+        # credentials rather than the placeholder strings that ship with the
+        # example config file.  this avoids popping up a blocking warning for
+        # users who haven't set up a database.
+        def _cfg_looks_valid(c):
+            # require non-empty host/user/password/dbname and reject values
+            # that start with '<' (the templated placeholders).
+            return (c.get('host') and not str(c.get('host')).startswith('<')
+                    and c.get('user') and not str(c.get('user')).startswith('<')
+                    and c.get('password') and not str(c.get('password')).startswith('<')
+                    and c.get('dbname') and not str(c.get('dbname')).startswith('<'))
+
+        if _cfg_looks_valid(cfg):
+            try:
+                import pymysql
+                db_conn = pymysql.connect(
+                    host=cfg['host'], port=cfg['port'],
+                    user=cfg['user'], password=cfg['password'],
+                    db=cfg['dbname'], connect_timeout=5
+                )
+            except Exception as exc:
                 db_error_msg = f"Could not open default database ({exc})"
                 print("Warning: ", db_error_msg)
+        else:
+            # skip connection attempt; user is probably using JSON backend
+            db_conn = None
 
     # create TK root and show any initial warning/info message
     root = tk.Tk()
-    if db_error_msg:
+    # Only display the warning popup if the user explicitly asked for a
+    # database.  Otherwise the error has already been printed and we silently
+    # continue with JSON storage.
+    if db_error_msg and db_path:
         messagebox.showwarning("Database", db_error_msg + ".\nUsing JSON fallback.")
     # no 'connected' popup; backend_label will show status
     app = RefereeApp(root, db_path=db_path, db_conn=db_conn)

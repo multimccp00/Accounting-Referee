@@ -51,6 +51,11 @@ Quick start
    - **the repository does not contain any usable database credentials.**
      you must supply your own via command line, environment variables, or
      the gitignored `db_connection.py` file described below.
+   - note: a blank/template `db_connection.py` (with '<your-...>' values) is
+     intentionally ignored at startup.  the app will not attempt to connect
+     using those placeholders and will silently fall back to the JSON backend
+     instead of showing a popup error.  remove or populate the file if you
+     intend to use a real database.
    - if you have an existing DB‑API connection object you can pass it
      programmatically when embedding the application; the manager will use
      it directly and assumes your schema is already created.
