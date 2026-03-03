@@ -19,43 +19,67 @@ DEFAULT_DB = {
 
 class RefereeApp:
     def __init__(self, root, db_path: str = None, db_conn=None):
+        print("[debug] RefereeApp.__init__ start")
         self.root = root
         self.root.title("Referee Earnings Tracker")
         # manager may use JSON, SQLite path, or a supplied connection object
+        print("[debug] creating GameDataManager (db_path=", db_path, "db_conn=", bool(db_conn), ")")
         if db_conn is not None:
             self.manager = GameDataManager(db_conn=db_conn)
         elif db_path:
             self.manager = GameDataManager(db_path=db_path)
         else:
             self.manager = GameDataManager()
+        print("[debug] manager created, conn=", getattr(self.manager, 'conn', None))
 
         # if we have a database connection, try a simple query now to make
         # sure the connection works; if it raises we fall back to JSON.
         if getattr(self.manager, 'conn', None) is not None:
+            print("[debug] testing database connection")
             try:
                 cur = self.manager.conn.cursor()
                 cur.execute('SELECT 1')
                 cur.fetchall()
                 cur.close()
+                print("[debug] db connection ok")
             except Exception as e:
                 print(f"Warning: database connection is unusable ({e}); using JSON instead.")
                 # replace manager with plain JSON instance
                 self.manager = GameDataManager()
+                print("[debug] manager replaced with JSON-only")
+        print("[debug] calling get_seasons")
         self.seasons = self.get_seasons()
+        print("[debug] seasons=", self.seasons)
         self.selected_season = tk.StringVar(value=self.seasons[0] if self.seasons else "2025/2026")
         self.games = []
+        self.selected_total = 0.0
+        print("[debug] calling setup_ui")
         self.setup_ui()
+        print("[debug] calling load_games")
         self.load_games()
+        print("[debug] RefereeApp.__init__ done")
 
     def get_seasons(self):
         # retrieve list of seasons available either in JSON files or in database
         seasons = []
         if self.manager.conn:
-            cursor = self.manager.conn.cursor()
-            cursor.execute("SELECT DISTINCT season FROM games ORDER BY season")
-            rows = cursor.fetchall()
-            seasons = [r[0] for r in rows]
-        else:
+            try:
+                cursor = self.manager.conn.cursor()
+                cursor.execute("SELECT DISTINCT season FROM games ORDER BY season")
+                rows = cursor.fetchall()
+                seasons = [r[0] for r in rows]
+            except Exception as exc:
+                # if the query fails we treat the database as unusable and
+                # fall back to JSON.  this mirrors the strategy in
+                # GameDataManager so the UI continues functioning.
+                print(f"Warning: unable to fetch seasons from DB: {exc}")
+                self.manager.db_error = str(exc)
+                try:
+                    self.manager.conn.close()
+                except Exception:
+                    pass
+                self.manager.conn = None
+        if not self.manager.conn:
             import os
             if os.path.isdir(self.manager.data_dir):
                 for f in os.listdir(self.manager.data_dir):
@@ -82,6 +106,9 @@ class RefereeApp:
         # Summary
         self.summary_label = ttk.Label(self.root, text="")
         self.summary_label.pack(fill='x', padx=10, pady=5)
+        # label showing sum of selected rows (updated when user selects games)
+        self.selection_label = ttk.Label(self.root, text="")
+        self.selection_label.pack(fill='x', padx=10, pady=(0,5))
         # backend status label (shows whether using DB or JSON)
         self.backend_label = ttk.Label(self.root, text="", foreground="#555")
         self.backend_label.pack(fill='x', padx=10, pady=(0,5))
@@ -105,6 +132,8 @@ class RefereeApp:
         for col in columns:
             self.tree.heading(col, text=self.col_headers[col], command=lambda c=col: self.on_column_click(c))
         self.tree.pack(fill='both', expand=True, padx=10, pady=5)
+        # handle selection changes so we can update the total
+        self.tree.bind('<<TreeviewSelect>>', lambda e: self.update_selection_sum())
         # sorting state
         self.sort_column = None
         self.sort_reverse = False
@@ -116,6 +145,7 @@ class RefereeApp:
         ttk.Button(btn_frame, text="Add Game", command=self.add_game_dialog).pack(side='left')
         ttk.Button(btn_frame, text="Edit Game", command=self.edit_game_dialog).pack(side='left')
         ttk.Button(btn_frame, text="Delete Game", command=self.delete_game).pack(side='left')
+        ttk.Button(btn_frame, text="Mark Paid", command=self.mark_selected_paid).pack(side='left', padx=5)
 
     def open_date_picker(self, entry_widget, initial_date_str=None):
         """Open a simple date picker popup; sets selected date into the provided entry widget in YYYY-MM-DD."""
@@ -248,10 +278,22 @@ class RefereeApp:
             obs = g.get('observations', "")
             # show amount actually paid in the TotalEarnings column
             self.tree.insert('', 'end', values=(g.get('date',''), g.get('gameNumber',''), g.get('location',''), f"{amount_paid:.2f} €", f"{left:.2f} €", g.get('paidStatus',''), obs))
+        # update selection sum in case previous selection is still valid
+        self.update_selection_sum()
 
     def update_summary(self):
         summary = self.manager.get_summary(self.selected_season.get())
-        self.summary_label.config(text=f"Total Earnings: {summary['total_earnings']:.2f} € | Amount Left: {summary['amount_left']:.2f} € | Games: {summary['games_count']}")
+        sel = float(getattr(self, 'selected_total', 0.0) or 0.0)
+        self.summary_label.config(
+            text=(
+                f"Total Earnings: {summary['total_earnings']:.2f} € | "
+                f"Amount Left: {summary['amount_left']:.2f} € | "
+                f"Selected: {sel:.2f} € | "
+                f"Games: {summary['games_count']}"
+            )
+        )
+        # secondary label no longer used for selected totals
+        self.selection_label.config(text="")
 
     def search_games(self):
         query = self.search_var.get().strip()
@@ -264,6 +306,57 @@ class RefereeApp:
         self.sort_column = None
         self.sort_reverse = False
         self._clear_header_arrows()
+
+    # ---------- new helpers ----------------------------------------------
+    def _parse_currency(self, text: str) -> float:
+        try:
+            return float(str(text).replace('€', '').strip())
+        except Exception:
+            return 0.0
+
+    def update_selection_sum(self):
+        """Recalculate and display the total of the currently selected games."""
+        total = 0.0
+        for iid in self.tree.selection():
+            vals = self.tree.item(iid).get('values', [])
+            if len(vals) >= 5:
+                # selected total should represent full game value (paid + left)
+                total += self._parse_currency(vals[3]) + self._parse_currency(vals[4])
+        self.selected_total = total
+        self.update_summary()
+
+    def mark_selected_paid(self):
+        """Set paid status for all selected games, using today's date."""
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showwarning("Mark Paid", "Select one or more games first.")
+            return
+        season = self.selected_season.get()
+        today_str = date.today().isoformat()
+        game_keys = [
+            (self.tree.item(i)['values'][1], self.tree.item(i)['values'][0])
+            for i in sel
+        ]
+        # ask for confirmation
+        if not messagebox.askyesno("Mark Paid", f"Mark {len(game_keys)} game(s) as paid today ({today_str})?"):
+            return
+
+        # perform update and handle any errors / fallbacks
+        try:
+            self.manager.mark_games_paid(season, game_keys, today_str)
+        except Exception as exc:
+            # unexpected failure (e.g. JSON write also failed).  surface error
+            messagebox.showerror("Mark Paid", f"Error marking games paid:\n{exc}")
+        finally:
+            # re‑load games so UI reflects whatever backend is now active
+            self.load_games()
+
+        # if the database became unusable during the update, let the user know
+        if getattr(self.manager, 'db_error', None) and not getattr(self.manager, 'conn', None):
+            messagebox.showwarning(
+                "Database Unavailable",
+                f"The database connection was lost; the application is now using local JSON files instead.\n({self.manager.db_error})"
+            )
 
     def add_game_dialog(self):
         self.game_dialog(mode='add')
@@ -323,12 +416,13 @@ class RefereeApp:
             messagebox.showwarning("Edit Game", "Select a game to edit.")
             return
         values = self.tree.item(selected[0])['values']
+        game_date = values[0]
         game_number = values[1]
         season = self.selected_season.get()
         games = self.manager.load_games(season)
         # Find the game by game number and all fields
         for g in games:
-            if str(g['gameNumber']) == str(game_number):
+            if str(g['gameNumber']) == str(game_number) and str(g.get('date','')) == str(game_date):
                 self.game_dialog(mode='edit', game=g)
                 return
         messagebox.showerror("Edit Game", "No matching game found to edit.")
@@ -360,8 +454,9 @@ class RefereeApp:
             messagebox.showwarning("Delete Game", "Select a game to delete.")
             return
         values = self.tree.item(selected[0])['values']
+        game_date = values[0]
         game_number = values[1]
-        self.manager.delete_game(self.selected_season.get(), game_number)
+        self.manager.delete_game(self.selected_season.get(), game_number, game_date)
         self.load_games()
 
     def game_dialog(self, mode='add', game=None):
@@ -390,6 +485,7 @@ class RefereeApp:
         entries = {}
         # remember original identifiers when editing
         original_game_number = game.get('gameNumber') if game else None
+        original_game_date = game.get('date') if game else None
         original_season = game.get('season') if game else None
         # Import DateEntry from tkcalendar
         try:
@@ -486,14 +582,14 @@ class RefereeApp:
                 # update existing game — use the original game number/season to find the record
                 if original_game_number is None:
                     # fallback: update by new gameNumber
-                    self.manager.update_game(game_data['season'], game_data['gameNumber'], game_data)
+                    self.manager.update_game(game_data['season'], game_data['gameNumber'], game_data, game_data.get('date'))
                 else:
                     # same season -> update in place
                     if original_season == game_data['season']:
-                        self.manager.update_game(original_season, original_game_number, game_data)
+                        self.manager.update_game(original_season, original_game_number, game_data, original_game_date)
                     else:
                         # moved to a different season: delete from old and add to new
-                        self.manager.delete_game(original_season, original_game_number)
+                        self.manager.delete_game(original_season, original_game_number, original_game_date)
                         self.manager.add_game(game_data['season'], game_data)
             dlg.destroy()
             self.seasons = self.get_seasons()
@@ -519,6 +615,8 @@ class RefereeApp:
         dlg.wait_window()
 
 if __name__ == "__main__":
+    # debug logging to console so we can see where execution reaches
+    print("[debug] starting app.main __main__")
     import argparse, os
     parser = argparse.ArgumentParser(description="Referee earnings tracker")
     parser.add_argument('--db', help='database path or URL to use (optional). If omitted a JSON backend is used. Can also be set via REF_DB_PATH env var.')
@@ -615,13 +713,27 @@ if __name__ == "__main__":
             # skip connection attempt; user is probably using JSON backend
             db_conn = None
 
-    # create TK root and show any initial warning/info message
-    root = tk.Tk()
-    # Only display the warning popup if the user explicitly asked for a
-    # database.  Otherwise the error has already been printed and we silently
-    # continue with JSON storage.
-    if db_error_msg and db_path:
-        messagebox.showwarning("Database", db_error_msg + ".\nUsing JSON fallback.")
-    # no 'connected' popup; backend_label will show status
-    app = RefereeApp(root, db_path=db_path, db_conn=db_conn)
-    root.mainloop()
+    try:
+        # create TK root and show any initial warning/info message
+        print("[debug] creating Tk root")
+        root = tk.Tk()
+        print("[debug] root created")
+        # Only display the warning popup if the user explicitly asked for a
+        # database.  Otherwise the error has already been printed and we silently
+        # continue with JSON storage.
+        if db_error_msg and db_path:
+            print("[debug] showing db error popup")
+            messagebox.showwarning("Database", db_error_msg + ".\nUsing JSON fallback.")
+        # no 'connected' popup; backend_label will show status
+        print("[debug] instantiating RefereeApp")
+        app = RefereeApp(root, db_path=db_path, db_conn=db_conn)
+        print("[debug] entering mainloop")
+        root.mainloop()
+        print("[debug] mainloop exited")
+    except Exception as e:
+        # ensure any exception is printed; otherwise the process may silently
+        # exit and the prompt will return leaving the user confused.
+        import traceback
+        print("[error] unhandled exception in main:")
+        traceback.print_exc()
+        sys.exit(1)

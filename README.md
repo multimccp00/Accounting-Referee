@@ -16,7 +16,7 @@ Key features
   written there.  This ensures your data persists between updates; the
   executable bundle itself is read‑only, so nothing is stored inside the
   package.
-- When a database connection is in use the manager will automatically **deduplicate** rows that share the same season and game number; the schema enforces a unique constraint so duplicates cannot reoccur.
+- When a database connection is in use the manager enforces uniqueness by **season + game number + date**. This means the same game number can be used on different dates, while preventing exact duplicate entries for the same day.
 - Local JSON files exist as a **write‑through backup only** (data folder is gitignored for privacy).  The database is always used for reads/writes; JSON files are updated after each change but never read by the application except during the initial one‑time migration step.
 
 Quick start
@@ -77,7 +77,15 @@ Quick start
      ```
      The app will attempt to open a MySQL connection using those values; if
      the connection fails it will fall back to the JSON backend and display a
-     warning on startup.
+     warning on startup.  
+     
+     If the database becomes unavailable while the application is running
+     (for example, because the remote server drops the connection) the
+     manager will automatically discard the broken connection and continue
+     operating against the last‑written JSON file.  You will see a warning
+     popup informing you that the database is no longer usable, and the "Backend"
+     label will switch to "local JSON files".  This ensures you can keep
+     working without losing any data.
 
      When a database connection is successfully established, the manager will
      also look at any existing `games_<season>.json` files in the `data/`
@@ -92,6 +100,14 @@ Usage notes
 - The app displays `Amount Paid` (only recorded payments) and `Amount Left` (outstanding due) per game.
 - Observations/notes are stored with each game and shown in the table.
 - All data is stored under the `data/` folder as JSON files (one file per season).
+
+### New features
+- When one or more rows are selected in the table a **"Selected total"** line
+  appears above the backend status; it shows the sum of the earnings for all
+  selected games.
+- A **"Mark Paid"** button (next to Add/Edit/Delete) lets you mark all
+  selected games as paid on the current date with a single click.  This works
+  whether you are using the JSON backend or a database.
 
 Privacy & GitHub
 - The `data/` directory is listed in `.gitignore` — your game data will not be included when you push this repo to GitHub.

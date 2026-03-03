@@ -74,9 +74,11 @@ class GameDataManager:
             return
         if self._is_sqlite():
             # include a uniqueness constraint so that the combination of
-            # season+gameNumber cannot be inserted twice.  this stops an
+            # season+gameNumber+date cannot be inserted twice.  this stops an
             # identical game from appearing twice even if add_game is called
-            # repeatedly or an import is run more than once.
+            # repeatedly or an import is run more than once.  we also add
+            # paymentDate/observations columns so the UI can track when a game
+            # was paid and any notes.
             sql = (
                 """CREATE TABLE IF NOT EXISTS games (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -88,13 +90,16 @@ class GameDataManager:
                         food REAL,
                         gamePayment REAL,
                         paidStatus TEXT,
-                        UNIQUE(season, gameNumber)
+                        paymentDate TEXT,
+                        observations TEXT,
+                        UNIQUE(season, gameNumber, date)
                     )"""
             )
         else:
             # generic SQL that should work on MySQL/Postgres; add the same
-            # uniqueness constraint so the combination of season+gameNumber
-            # cannot be duplicated.
+            # uniqueness constraint so the combination of
+            # season+gameNumber+date cannot be duplicated.  add
+            # paymentDate/observations while we're here.
             sql = (
                 """CREATE TABLE IF NOT EXISTS games (
                         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -106,7 +111,9 @@ class GameDataManager:
                         food DOUBLE,
                         gamePayment DOUBLE,
                         paidStatus VARCHAR(50),
-                        UNIQUE(season, gameNumber)
+                        paymentDate VARCHAR(255),
+                        observations TEXT,
+                        UNIQUE(season, gameNumber, date)
                     )"""
             )
         try:
@@ -130,6 +137,79 @@ class GameDataManager:
             except Exception:
                 pass
             self.conn = None
+            return
+
+        # after ensuring table exists, add any missing columns from older
+        # installations.  create-table above will not modify an existing table,
+        # so we may need to ALTER it.  we check for paymentDate/observations
+        # because those were added later.
+        try:
+            cur = self.conn.cursor()
+            existing = []
+            if self._is_sqlite():
+                cur.execute("PRAGMA table_info(games)")
+                existing = [r[1] for r in cur.fetchall()]
+            else:
+                cur.execute("SHOW COLUMNS FROM games")
+                existing = [r[0] for r in cur.fetchall()]
+            if 'paymentDate' not in existing:
+                try:
+                    cur.execute("ALTER TABLE games ADD COLUMN paymentDate TEXT")
+                except Exception:
+                    pass
+            if 'observations' not in existing:
+                try:
+                    cur.execute("ALTER TABLE games ADD COLUMN observations TEXT")
+                except Exception:
+                    pass
+            if not self._is_sqlite():
+                self.conn.commit()
+            cur.close()
+        except Exception:
+            # non-fatal; table may already be up-to-date or access denied
+            pass
+
+        # Ensure existing non-sqlite databases have the expected unique
+        # index shape (season, gameNumber, date). Older installations used
+        # (season, gameNumber), which blocks same gameNumber on different
+        # dates.
+        if not self._is_sqlite():
+            try:
+                cur = self.conn.cursor()
+                cur.execute("SHOW INDEX FROM games WHERE Non_unique = 0")
+                rows = cur.fetchall()
+                by_name = {}
+                for r in rows:
+                    # MySQL SHOW INDEX columns:
+                    # 2=Key_name, 3=Seq_in_index, 4=Column_name
+                    key_name = r[2]
+                    seq = int(r[3])
+                    col = r[4]
+                    by_name.setdefault(key_name, {})[seq] = col
+
+                needs_new = True
+                drop_candidates = []
+                for key_name, seq_map in by_name.items():
+                    cols = [seq_map[s] for s in sorted(seq_map.keys())]
+                    if cols == ['season', 'gameNumber', 'date']:
+                        needs_new = False
+                    elif cols == ['season', 'gameNumber']:
+                        drop_candidates.append(key_name)
+
+                for key_name in drop_candidates:
+                    if key_name != 'PRIMARY':
+                        cur.execute(f"ALTER TABLE games DROP INDEX {key_name}")
+
+                if needs_new:
+                    cur.execute(
+                        "ALTER TABLE games ADD UNIQUE INDEX uniq_season_game_date (season, gameNumber, date)"
+                    )
+                self.conn.commit()
+                cur.close()
+            except Exception:
+                # Non-fatal migration safety: if index alteration fails, app
+                # still runs and existing behavior is preserved.
+                pass
 
     def get_season_file(self, season: str) -> str:
         return os.path.join(self.data_dir, f"games_{season.replace('/', '-')}.json")
@@ -137,20 +217,36 @@ class GameDataManager:
     # ------ database helpers ------------------------------------------------
     def _row_to_game(self, row: tuple) -> Dict[str, Any]:
         # row order must match the SELECT statement used below
-        _, season, gameNumber, date, location, transportation, food, gamePayment, paidStatus = row
-        return {
-            'season': season,
-            'gameNumber': gameNumber,
-            'date': date,
-            'location': location,
-            'transportation': transportation,
-            'food': food,
-            'gamePayment': gamePayment,
-            'paidStatus': paidStatus,
-        }
+        # support new paymentDate/observations columns if they exist
+        if len(row) >= 11:
+            _, season, gameNumber, date, location, transportation, food, gamePayment, paidStatus, paymentDate, observations = row
+            return {
+                'season': season,
+                'gameNumber': gameNumber,
+                'date': date,
+                'location': location,
+                'transportation': transportation,
+                'food': food,
+                'gamePayment': gamePayment,
+                'paidStatus': paidStatus,
+                'paymentDate': paymentDate,
+                'observations': observations,
+            }
+        else:
+            _, season, gameNumber, date, location, transportation, food, gamePayment, paidStatus = row
+            return {
+                'season': season,
+                'gameNumber': gameNumber,
+                'date': date,
+                'location': location,
+                'transportation': transportation,
+                'food': food,
+                'gamePayment': gamePayment,
+                'paidStatus': paidStatus,
+            }
 
     def _dedupe_db(self):
-        """Remove duplicate season/gameNumber rows from the database.
+        """Remove duplicate season/gameNumber/date rows from the database.
 
         The table has a unique index, but duplicates may already exist if the
         database was written to manually or imported twice.  This method keeps
@@ -160,11 +256,11 @@ class GameDataManager:
             return
         cursor = self.conn.cursor()
         placeholder = '?' if self._is_sqlite() else '%s'
-        cursor.execute(f"SELECT id, season, gameNumber FROM games")
+        cursor.execute(f"SELECT id, season, gameNumber, date FROM games")
         seen = set()
         to_delete = []
-        for _id, season, gameNumber in cursor.fetchall():
-            key = (season, gameNumber)
+        for _id, season, gameNumber, game_date in cursor.fetchall():
+            key = (season, gameNumber, game_date)
             if key in seen:
                 to_delete.append(_id)
             else:
@@ -382,11 +478,32 @@ class GameDataManager:
         delete_sql = f"DELETE FROM games WHERE season = {placeholder}"
         insert_sql = (
             "INSERT INTO games(season,gameNumber,date,location,"
-            "transportation,food,gamePayment,paidStatus) VALUES (" +
-            ",".join([placeholder]*8) + ")"
+            "transportation,food,gamePayment,paidStatus,paymentDate,observations) VALUES (" +
+            ",".join([placeholder]*10) + ")"
         )
-        with self.conn:
-            cur = self.conn.cursor()
+        if self._is_sqlite():
+            with self.conn:
+                cur = self.conn.cursor()
+                cur.execute(delete_sql, (season,))
+                for g in games:
+                    cur.execute(insert_sql, (
+                        season,
+                        g.get('gameNumber'),
+                        g.get('date'),
+                        g.get('location'),
+                        g.get('transportation', 0),
+                        g.get('food', 0),
+                        g.get('gamePayment', 0),
+                        g.get('paidStatus'),
+                        g.get('paymentDate',''),
+                        g.get('observations',''),
+                    ))
+            # keep JSON backup in sync even when DB is primary
+            self._dump_json(season)
+            return
+
+        cur = self.conn.cursor()
+        try:
             cur.execute(delete_sql, (season,))
             for g in games:
                 cur.execute(insert_sql, (
@@ -398,20 +515,54 @@ class GameDataManager:
                     g.get('food', 0),
                     g.get('gamePayment', 0),
                     g.get('paidStatus'),
+                    g.get('paymentDate',''),
+                    g.get('observations',''),
                 ))
+            self.conn.commit()
+        except Exception:
+            try:
+                self.conn.rollback()
+            except Exception:
+                pass
+            raise
+        finally:
+            cur.close()
+
+        # keep JSON backup in sync even when DB is primary
+        self._dump_json(season)
+
+    # helpers for JSON fallback ------------------------------------------------
+    def _json_load_games(self, season: str) -> List[Dict[str, Any]]:
+        """Read season data directly from the JSON file.
+
+        This is used when the database is unavailable so that the UI can still
+        display existing games and the user can continue working.  The JSON
+        files are always kept up to date by the write–through logic in
+        ``save_games``/``_dump_json`` so using them as a fallback is safe.
+        """
+        path = self.get_season_file(season)
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                games = json.load(f)
+                if isinstance(games, list):
+                    return games
+        except Exception:
+            pass
+        return []
 
     def load_games(self, season: str) -> List[Dict[str, Any]]:
-        """Return all games for a season from the database.
+        """Return all games for a season.
 
-        JSON files are never read; they are maintained only as a write-through
-        backup by ``_dump_json``.  If no connection exists or a DB error
-        occurs the method returns an empty list (and ``self.db_error`` is set
-        so the UI may notify the user).
+        When a database connection is present we read from it; if any error
+        occurs the connection is discarded and we fall back to reading the
+        appropriate JSON file so that the rest of the application continues to
+        work.  ``self.db_error`` is set to a human‑readable message in either
+        case so the UI can display a warning.
         """
         if not self.conn:
-            # no database connection available
+            # already in JSON mode
             self.db_error = "no database connection"
-            return []
+            return self._json_load_games(season)
         try:
             games = self._db_load_games(season)
             self.db_error = None
@@ -419,8 +570,14 @@ class GameDataManager:
         except Exception as exc:
             print(f"Database read error: {exc}")
             self.db_error = str(exc)
-            # keep connection open but return empty results
-            return []
+            # the connection appears to be unusable; drop it so callers reuse
+            # the reliable JSON backend from this point forward.
+            try:
+                self.conn.close()
+            except Exception:
+                pass
+            self.conn = None
+            return self._json_load_games(season)
 
     def save_games(self, season: str, games: List[Dict[str, Any]]):
         if self.conn:
@@ -434,29 +591,11 @@ class GameDataManager:
 
     def add_game(self, season: str, game: Dict[str, Any]):
         if self.conn:
-            # remove any existing row for this season/gameNumber so we never
-            # create duplicate entries; the unique index above will also
-            # prevent a second insert but we avoid the exception by cleaning
-            # up first.
-            try:
-                placeholder = '?' if self._is_sqlite() else '%s'
-                del_sql = f"DELETE FROM games WHERE season={placeholder} AND gameNumber={placeholder}"
-                if self._is_sqlite():
-                    with self.conn:
-                        self.conn.execute(del_sql, (season, game.get('gameNumber')))
-                else:
-                    cur = self.conn.cursor()
-                    cur.execute(del_sql, (season, game.get('gameNumber')))
-                    self.conn.commit()
-                    cur.close()
-            except Exception:
-                pass
-
             placeholder = '?' if self._is_sqlite() else '%s'
             sql = (
                 """INSERT INTO games(season,gameNumber,date,location,""" +
-                "transportation,food,gamePayment,paidStatus) VALUES (" +
-                ",".join([placeholder]*8) + ")"
+                "transportation,food,gamePayment,paidStatus,paymentDate,observations) VALUES (" +
+                ",".join([placeholder]*10) + ")"
             )
             try:
                 if self._is_sqlite():
@@ -470,6 +609,8 @@ class GameDataManager:
                             game.get('food', 0),
                             game.get('gamePayment', 0),
                             game.get('paidStatus'),
+                            game.get('paymentDate',''),
+                            game.get('observations',''),
                         ))
                 else:
                     cur = self.conn.cursor()
@@ -482,6 +623,8 @@ class GameDataManager:
                         game.get('food', 0),
                         game.get('gamePayment', 0),
                         game.get('paidStatus'),
+                        game.get('paymentDate',''),
+                        game.get('observations',''),
                     ))
                     self.conn.commit()
                     cur.close()
@@ -495,39 +638,39 @@ class GameDataManager:
         games.append(game)
         self.save_games(season, games)
 
-    def update_game(self, season: str, game_number: str, updated_game: Dict[str, Any]):
+    def update_game(self, season: str, game_number: str, updated_game: Dict[str, Any], game_date: str = None):
         if self.conn:
             placeholder = '?' if self._is_sqlite() else '%s'
+            where_sql = " WHERE season=" + placeholder + " AND gameNumber=" + placeholder
+            if game_date is not None:
+                where_sql += " AND date=" + placeholder
             sql = (
                 """UPDATE games SET date=""" + placeholder + ", location=" + placeholder + ", transportation=" + placeholder +
                 ", food=" + placeholder + ", gamePayment=" + placeholder + ", paidStatus=" + placeholder +
-                " WHERE season=" + placeholder + " AND gameNumber=" + placeholder
+                ", paymentDate=" + placeholder + ", observations=" + placeholder +
+                where_sql
             )
             try:
+                params = [
+                    updated_game.get('date'),
+                    updated_game.get('location'),
+                    updated_game.get('transportation', 0),
+                    updated_game.get('food', 0),
+                    updated_game.get('gamePayment', 0),
+                    updated_game.get('paidStatus'),
+                    updated_game.get('paymentDate',''),
+                    updated_game.get('observations',''),
+                    season,
+                    game_number,
+                ]
+                if game_date is not None:
+                    params.append(game_date)
                 if self._is_sqlite():
                     with self.conn:
-                        self.conn.execute(sql, (
-                            updated_game.get('date'),
-                            updated_game.get('location'),
-                            updated_game.get('transportation', 0),
-                            updated_game.get('food', 0),
-                            updated_game.get('gamePayment', 0),
-                            updated_game.get('paidStatus'),
-                            season,
-                            game_number,
-                        ))
+                        self.conn.execute(sql, tuple(params))
                 else:
                     cur = self.conn.cursor()
-                    cur.execute(sql, (
-                        updated_game.get('date'),
-                        updated_game.get('location'),
-                        updated_game.get('transportation', 0),
-                        updated_game.get('food', 0),
-                        updated_game.get('gamePayment', 0),
-                        updated_game.get('paidStatus'),
-                        season,
-                        game_number,
-                    ))
+                    cur.execute(sql, tuple(params))
                     self.conn.commit()
                     cur.close()
                 self._dump_json(season)
@@ -536,22 +679,26 @@ class GameDataManager:
             return
         games = self.load_games(season)
         for idx, g in enumerate(games):
-            if g['gameNumber'] == game_number:
+            if g['gameNumber'] == game_number and (game_date is None or g.get('date') == game_date):
                 games[idx] = updated_game
                 break
         self.save_games(season, games)
 
-    def delete_game(self, season: str, game_number: str):
+    def delete_game(self, season: str, game_number: str, game_date: str = None):
         if self.conn:
             placeholder = '?' if self._is_sqlite() else '%s'
             sql = f"DELETE FROM games WHERE season={placeholder} AND gameNumber={placeholder}"
+            params = [season, game_number]
+            if game_date is not None:
+                sql += f" AND date={placeholder}"
+                params.append(game_date)
             try:
                 if self._is_sqlite():
                     with self.conn:
-                        self.conn.execute(sql, (season, game_number))
+                        self.conn.execute(sql, tuple(params))
                 else:
                     cur = self.conn.cursor()
-                    cur.execute(sql, (season, game_number))
+                    cur.execute(sql, tuple(params))
                     self.conn.commit()
                     cur.close()
                 # update backups
@@ -560,8 +707,56 @@ class GameDataManager:
                 raise
             return
         games = self.load_games(season)
-        games = [g for g in games if g['gameNumber'] != game_number]
+        games = [g for g in games if not (g['gameNumber'] == game_number and (game_date is None or g.get('date') == game_date))]
         self.save_games(season, games)
+
+    def mark_games_paid(self, season: str, game_numbers: List[Any], payment_date: str):
+        """Mark the specified game numbers as paid and set their payment date.
+
+        This works whether we're using a database or plain JSON.  In DB mode we
+        load the games, modify the entries and then call ``save_games`` which
+        will overwrite the season.  ``payment_date`` should be an ISO-formatted
+        string (YYYY-MM-DD).
+        """
+        games = self.load_games(season)
+        changed = False
+        targets_numbers = set()
+        targets_pairs = set()
+        for n in game_numbers:
+            if isinstance(n, (tuple, list)) and len(n) >= 2:
+                targets_pairs.add((str(n[0]), str(n[1])))
+            elif isinstance(n, dict) and 'gameNumber' in n and 'date' in n:
+                targets_pairs.add((str(n.get('gameNumber')), str(n.get('date'))))
+            else:
+                targets_numbers.add(str(n))
+        for g in games:
+            game_key = (str(g.get('gameNumber')), str(g.get('date')))
+            should_update = (game_key in targets_pairs) or (str(g.get('gameNumber')) in targets_numbers)
+            if should_update:
+                if str(g.get('paidStatus','')).lower() != 'yes':
+                    g['paidStatus'] = 'Yes'
+                    changed = True
+                g['paymentDate'] = payment_date
+                changed = True
+        if changed:
+            try:
+                self.save_games(season, games)
+            except Exception as exc:
+                # if writing to the database failed for any reason, drop the
+                # connection and fall back to JSON storage so the update isn't
+                # lost.  ``save_games`` will raise again if the JSON write also
+                # fails, which is fine since something is very wrong at that
+                # point.
+                print(f"Database write error during mark_games_paid: {exc}")
+                self.db_error = str(exc)
+                try:
+                    if self.conn:
+                        self.conn.close()
+                except Exception:
+                    pass
+                self.conn = None
+                # re‑attempt using JSON backend
+                self.save_games(season, games)
 
     def search_games(self, season: str, query: str) -> List[Dict[str, Any]]:
         if self.conn:
@@ -579,9 +774,29 @@ class GameDataManager:
         return [g for g in games if query in g['gameNumber'].lower() or query in g['location'].lower() or query in g['date'].lower()]
 
     def get_summary(self, season: str) -> Dict[str, Any]:
+        """Return totals for a season.
+
+        Works against either the database or the JSON files.  If the database is
+        unavailable we recompute the summary from the JSON fallback.  Any error
+        encountered reading the database causes the connection to be dropped so
+        subsequent calls don’t repeatedly fail.
+        """
         if not self.conn:
             self.db_error = "no database connection"
-            return {'total_earnings': 0.0, 'amount_left': 0.0, 'games_count': 0}
+            # compute from JSON instead of returning zeros
+            games = self._json_load_games(season)
+            total_paid = 0.0
+            total_due_left = 0.0
+            for g in games:
+                try:
+                    total = float(g.get('transportation', 0)) + float(g.get('food', 0)) + float(g.get('gamePayment', 0))
+                except Exception:
+                    total = 0.0
+                if str(g.get('paidStatus','')).lower() == 'yes':
+                    total_paid += total
+                else:
+                    total_due_left += total
+            return {'total_earnings': total_paid, 'amount_left': total_due_left, 'games_count': len(games)}
         try:
             cursor = self.conn.cursor()
             placeholder = '?' if self._is_sqlite() else '%s'
@@ -609,4 +824,10 @@ class GameDataManager:
         except Exception as exc:
             print(f"Database summary error: {exc}")
             self.db_error = str(exc)
-            return {'total_earnings': 0.0, 'amount_left': 0.0, 'games_count': 0}
+            try:
+                self.conn.close()
+            except Exception:
+                pass
+            self.conn = None
+            # fall back to JSON summary
+            return self.get_summary(season)
