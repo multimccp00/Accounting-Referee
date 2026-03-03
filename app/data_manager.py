@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+from datetime import date
 from typing import List, Dict, Any
 
 # determine where to write persistent JSON data.  When running
@@ -710,7 +711,7 @@ class GameDataManager:
         games = [g for g in games if not (g['gameNumber'] == game_number and (game_date is None or g.get('date') == game_date))]
         self.save_games(season, games)
 
-    def mark_games_paid(self, season: str, game_numbers: List[Any], payment_date: str):
+    def mark_games_paid(self, season: str, game_numbers: List[Any], payment_date: str = None):
         """Mark the specified game numbers as paid and set their payment date.
 
         This works whether we're using a database or plain JSON.  In DB mode we
@@ -718,6 +719,7 @@ class GameDataManager:
         will overwrite the season.  ``payment_date`` should be an ISO-formatted
         string (YYYY-MM-DD).
         """
+        effective_payment_date = payment_date or date.today().isoformat()
         games = self.load_games(season)
         changed = False
         targets_numbers = set()
@@ -736,7 +738,7 @@ class GameDataManager:
                 if str(g.get('paidStatus','')).lower() != 'yes':
                     g['paidStatus'] = 'Yes'
                     changed = True
-                g['paymentDate'] = payment_date
+                g['paymentDate'] = effective_payment_date
                 changed = True
         if changed:
             try:
