@@ -1,0 +1,75 @@
+QUICK START GUIDE
+=================
+
+RUNNING THE APPS
+================
+
+Desktop Version (Tkinter - Traditional):
+  python -m app.ui.app
+
+Mobile Version (Kivy - Material Design):
+  python app/mobile/main.py
+
+Choose Which Version:
+  python run_app.py
+
+
+FEATURES
+========
+
+Both versions share the same data:
+- Games: data/all_games.json
+- Test progress: data/test_progress.json
+- Rulebook: data/handball_content.json
+
+Tkinter (Desktop):
+✓ Game tracking
+✓ Earnings management
+✓ Rulebook PDF viewer
+✓ 4-question tests
+✓ Test review with rules
+✓ Random Question of the Day
+✓ Statistics
+✓ Modern Material Design UI
+
+Kivy (Mobile):
+✓ Dashboard with KPI cards
+✓ Games list
+✓ Test menu
+✓ Rulebook viewer
+✓ Statistics
+✓ Material Design UI
+(More features being added)
+
+
+BUILDING ANDROID APK
+====================
+
+1. Install buildozer:
+   pip install buildozer cython
+
+2. Build:
+   buildozer android debug
+
+3. Wait 5-10 minutes
+
+4. Output: bin/referee_tracker-1.0.0-debug.apk
+
+5. Install on phone:
+   adb install -r bin/referee_tracker-1.0.0-debug.apk
+
+Easier on Linux/WSL:
+   wsl --install
+   (Then run buildozer in WSL)
+
+
+TIPS
+====
+
+- Switch between versions anytime - data syncs automatically
+- Kivy window is 540x960px (mobile size) for testing
+- Both use same game/test data files
+- Check MOBILE_SETUP.md for detailed build instructions
+- Check MIGRATION_SUMMARY.md for project overview
+
+ENJOY!

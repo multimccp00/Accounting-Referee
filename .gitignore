@@ -1,0 +1,65 @@
+# ---- Secrets / private config ----
+# DB credentials — keep this file local, never commit
+db_connection.py
+
+# ---- Python bytecode & caches ----
+# (compiled .pyc files can leak source strings incl. credentials — never commit)
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+
+# ---- Game / user data ----
+/data/
+*.db
+*.sqlite
+*.sqlite3
+*.sqlite.backup
+
+# ---- Excel / local exports ----
+*.xlsx
+*.xls
+*.csv
+
+# ---- Android / Kivy build artifacts ----
+.buildozer/
+bin/
+*.apk
+*.aab
+
+# ---- Virtual environments ----
+.venv/
+venv/
+env/
+ENV/
+
+# ---- Build / packaging ----
+build/
+dist/
+*.egg-info/
+*.spec.bak
+
+# ---- PyInstaller ----
+*.manifest
+
+# ---- Logs & temp ----
+*.log
+*.tmp
+*.bak
+
+# ---- Screenshots / working images (not part of source) ----
+portfolio/
+*.png.tmp
+
+# ---- OS / editor cruft ----
+.DS_Store
+Thumbs.db
+Desktop.ini
+.vscode/
+.idea/
+*.swp
+*~
+
+# Real game data (personal financial records) — keep local
+/all_games.json
+/games_*.json

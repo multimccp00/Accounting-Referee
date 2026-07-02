@@ -1,0 +1,11 @@
+tkcalendar
+psycopg2-binary
+pymysql
+cryptography
+pypdf
+openpyxl
+Pillow
+PyMuPDF
+kivy
+kivymd
+buildozer
